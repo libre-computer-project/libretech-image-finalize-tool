@@ -1,0 +1,299 @@
+#!/bin/bash
+# SPDX-License-Identifier: CC BY-NC-ND 4.0
+# Copyright (C) 2022 Da Xue <da@libre.computer>
+# See LICENSE for full license text
+
+echo "This script is licensed under Attribution-NonCommercial-NoDerivatives 4.0 International terms."
+echo "It is designed for Libre Computer images only!"
+echo "Press y to acknowledge or any other key to cancel."
+read -n 1 key
+if [ "${key,,}" != "y" ]; then
+	exit 1
+fi
+
+set -e
+
+PATH_SCRIPT=$(dirname $(readlink -f "${BASH_SOURCE[0]}"))
+#echo "$PATH_SCRIPT"
+
+. "$PATH_SCRIPT"/lib/traps.sh
+. "$PATH_SCRIPT"/lib/loop.sh
+LOOP_checkPerm
+
+if [ -z "$1" ]; then
+	echo "$0 IMAGE" >&2
+	exit 1
+elif [ ! -f "$1" ]; then
+	echo "$1 is not a file." >&2
+	exit 1
+fi
+
+target_dir=$(dirname "$1")
+target_filename=$(basename "$1")
+target="${target_dir}/lift.${target_filename}"
+cp --reflink=auto "$1" "$target"
+
+pt_type=$(blkid -s PTTYPE -o value "$target")
+if [ "$pt_type" = "dos" ]; then
+	pt_dump=$(sfdisk -d "$target")
+	pt_list=$(echo "$pt_dump" | grep "^$target")
+	pt_count=$(echo "$pt_list" | wc -l)
+	
+	if [ "$pt_count" -lt 2 ]; then
+		echo "This script requires at least 2 partitions." >&2
+		exit 1
+	elif [ "$pt_count" -gt 3 ]; then
+		echo "This script supports at most 3 partitions." >&2
+		exit 1
+	fi
+	
+	pt_fat=$(echo "$pt_list" | grep "type=\(ef\|c\)")
+	pt_fat_count=$(echo "$pt_fat" | wc -l)
+	if [ "$pt_fat_count" -eq 0 ]; then
+		echo "No FAT partition found." >&2
+		exit 1
+	elif [ "$pt_fat_count" -eq 1 ]; then
+		pt_efi=$(echo "$pt_fat" | cut -f 1 -d " ")
+		pt_efi="${pt_efi/$target/}"
+	else
+		echo "Too many FAT partitions found." >&2
+		exit 1
+	fi
+	
+	pt_linux=$(echo "$pt_list" | grep "type=83")
+	pt_linux_count=$(echo "$pt_linux" | wc -l)
+	if [ "$pt_linux_count" -eq 0 ]; then
+		echo "No Linux partition found." >&2
+		exit 1
+	elif [ "$pt_linux_count" -eq 1 ]; then
+		pt_root=$(echo "$pt_linux" | cut -f 1 -d " ")
+		pt_root="${pt_root/$target/}"
+		pt_root_start=$(echo "$pt_linux" | grep -o "start=\\s\\+[0-9]\\+" | grep -o "[0-9]\\+")
+		pt_root_size=$(echo "$pt_linux" | grep -o "size=\\s\\+[0-9]\\+" | grep -o "[0-9]\\+")
+	else
+		echo "Too many root partitions found." >&2
+		exit 1
+	fi
+	
+	if [ "$pt_count" -eq 3 ]; then
+		pt_swap=$(echo "$pt_list" | grep "Linux swap")
+		pt_swap_count=$(echo "$pt_swap" | wc -l)
+		if [ "$pt_swap_count" -eq 0 ]; then
+			echo "No swap partition found." >&2
+			exit 1
+		elif [ "$pt_swap_count" -eq 1 ]; then
+			pt_swap=$(echo "$pt_swap" | cut -f 1 -d " ")
+			pt_swap="${pt_swap/$target/}"
+		else
+			echo "Too many swap partitions found." >&2
+			exit 1
+		fi
+	else
+		pt_swap=0
+	fi
+elif [ "$pt_type" = "gpt" ]; then
+	pt_dump=$(sfdisk -d "$target")
+	pt_list=$(echo "$pt_dump" | grep "^$target")
+	pt_count=$(echo "$pt_list" | wc -l)
+	
+	if [ "$pt_count" -lt 2 ]; then
+		echo "This script requires at least 2 partitions." >&2
+		exit 1
+	elif [ "$pt_count" -gt 3 ]; then
+		echo "This script supports at most 3 partitions." >&2
+		exit 1
+	fi
+	
+	pt_fat=$(echo "$pt_list" | grep "type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
+	pt_fat_count=$(echo "$pt_fat" | wc -l)
+	if [ "$pt_fat_count" -eq 0 ]; then
+		echo "No FAT partition found." >&2
+		exit 1
+	elif [ "$pt_fat_count" -eq 1 ]; then
+		pt_efi=$(echo "$pt_fat" | cut -f 1 -d " ")
+		pt_efi="${pt_efi/$target/}"
+	else
+		echo "Too many FAT partitions found." >&2
+		exit 1
+	fi
+	
+	pt_linux=$(echo "$pt_list" | grep "type=\(0FC63DAF-8483-4772-8E79-3D69D8477DE4\|EBD0A0A2-B9E5-4433-87C0-68B6B72699C7\|69DAD710-2CE4-4E3C-B16C-21A1D49ABED3\|B921B045-1DF0-41C3-AF44-4C6F280D3FAE\)")
+	pt_linux_count=$(echo "$pt_linux" | wc -l)
+	if [ "$pt_linux_count" -eq 0 ]; then
+		echo "No Linux partition found." >&2
+		exit 1
+	elif [ "$pt_linux_count" -lt 3 ]; then
+		if [ "$pt_linux_count" -eq 2 ]; then
+			pt_linux_sizes=($(echo "$pt_linux" | grep -o "size=\\s\\+[0-9]\\+" | grep -o "[0-9]\\+"))
+			if [ "${pt_linux_sizes[0]}" -ge "${pt_linux_sizes[1]}" ]; then
+				pt_linux=$(echo "$pt_linux" | head -n 1)
+			else
+				pt_linux=$(echo "$pt_linux" | tail -n 1)
+			fi
+		fi
+		pt_root=$(echo "$pt_linux" | cut -f 1 -d " ")
+		pt_root="${pt_root/$target/}"
+		pt_root_start=$(echo "$pt_linux" | grep -o "start=\\s\\+[0-9]\\+" | grep -o "[0-9]\\+")
+		pt_root_size=$(echo "$pt_linux" | grep -o "size=\\s\\+[0-9]\\+" | grep -o "[0-9]\\+")
+	else
+		echo "Too many root partitions found." >&2
+		exit 1
+	fi
+	
+	if [ "$pt_count" -eq 3 ]; then
+		pt_swap=$(echo "$pt_list" | grep -v "^$pt_linux\$" | grep "type=\(0657FD6D-A4AB-43C4-84E5-0933C84B4F4F\|EBD0A0A2-B9E5-4433-87C0-68B6B72699C7\)")
+		pt_swap_count=$(echo "$pt_swap" | wc -l)
+		if [ "$pt_swap_count" -eq 0 ]; then
+			echo "No swap partition found." >&2
+			exit 1
+		elif [ "$pt_swap_count" -eq 1 ]; then
+			pt_dump=$(echo "$pt_dump" | grep -v "$pt_swap")
+			pt_swap_size=$(echo "$pt_swap" | grep -o "size=\\s\\+[0-9]\\+" | grep -o "[0-9]\\+")
+			pt_swap=$(echo "$pt_swap" | cut -f 1 -d " ")
+			pt_swap="${pt_swap/$target/}"
+		else
+			echo "Too many swap partitions found." >&2
+			exit 1
+		fi
+	else
+		pt_swap=0
+	fi
+else
+	echo "Unknown partition table type." >&2
+	exit 1
+fi
+
+traps_start
+
+loop_dev=$(LOOP_setup "$target")
+traps_push LOOP_detach "$loop_dev"
+partprobe "$loop_dev"
+sleep 1
+
+pt_efi_dev="${loop_dev}p${pt_efi}"
+pt_efi_type=$(blkid -s TYPE -o value "$pt_efi_dev")
+if [ "$pt_efi_type" != "vfat" ]; then
+	echo "EFI partition type $pt_efi_type is not supported." >&2
+	exit 1
+fi
+
+pt_root_dev="${loop_dev}p${pt_root}"
+pt_root_type=$(blkid -s TYPE -o value "$pt_root_dev")
+case "$pt_root_type" in
+	ext*)
+		:
+		;;
+	btrfs)
+		:
+		;;
+	*)
+		echo "Root partition type $pt_root_type is not supported." >&2
+		;;
+esac
+
+if [ $pt_swap -gt 0 ]; then
+	pt_swap_dev="${loop_dev}p${pt_swap}"
+	pt_swap_type=$(blkid -s TYPE -o value "$pt_swap_dev")
+	if [ "$pt_swap_type" != "swap" ]; then
+		echo "Swap partition type $pt_swap_type is not supported." >&2
+		exit 1
+	fi
+fi
+
+mount_dir=$(mktemp -d)
+traps_push rmdir "$mount_dir"
+
+
+case "$pt_root_type" in
+	ext*)
+		mount -t "$pt_root_type" -o noatime "$pt_root_dev" "$mount_dir"
+		traps_push umount "$mount_dir"
+		
+		if [ -f "$mount_dir/etc/fstab" ]; then
+			sed -i "s/.*\\s\\+swap\\s\\+.*/#\\0/" "$mount_dir/etc/fstab"
+		fi
+		
+		if ! grep "x-systemd.growfs" "$mount_dir/etc/fstab"; do
+			#TODO: add growfs script
+			echo "Image needs resizefs script."
+			exit 1
+		done
+		
+		e4defrag "$mount_dir"
+		resize2fs -Mp "$mount_dir"
+		
+		pt_root_block_param=($(dumpe2fs -h "$pt_root_dev" | grep "^Block\\s\(count\|size\):" | grep -o "[0-9]\\+"))
+		pt_root_size_bytes=$((${pt_root_block_param[0]} * ${pt_root_block_param[1]}))
+		pt_root_size_new=$((pt_root_size_bytes >> 9))
+		
+		traps_pop #umount
+		;;
+	btrfs)
+		mount -t "$pt_root_type" -o noatime,compress=zstd,nossd,subvolid=5 "$pt_root_dev" "$mount_dir"
+		traps_push umount "$mount_dir"
+		
+		pt_root_default_path=$(btrfs subvolume get-default "$mount_dir")
+		if echo "$pt_root_default_path" | grep "path"; then
+			pt_root_default_path=/$(echo "$pt_root_default_path" | grep -o "path .*" | cut -f 2- -d " ")
+			pt_root_fstab_path="$pt_root_default_path/etc/fstab"
+		else
+			pt_root_default_path=/
+			pt_root_fstab_path=etc/fstab
+		fi
+		
+		if [ -f "$mount_dir/$pt_root_fstab_path" ]; then
+			sed -i "s/.*\\s\\+swap\\s\\+.*/#\\0/" "$mount_dir/$pt_root_fstab_path"
+		fi
+		
+		if ! grep "x-systemd.growfs" "$mount_dir/$pt_root_fstab_path"; do
+			#TODO: add growfs script
+			echo "Image needs resizefs support."
+			exit 1
+		done
+		
+		if [ -f "$mount_dir$pt_root_default_path/swapfile" ]; then
+			rm "$mount_dir$pt_root_default_path/swapfile"
+		fi
+		
+		btrfs filesystem defragment -r -czstd "$mount_dir" > /dev/null
+		btrfs balance start --full-balance "$mount_dir"
+		
+		reduce_step=$((128*1024*1024))
+		
+		while true; do
+			unallocated=$(btrfs filesystem usage -b "$mount_dir" | grep "Device unallocated" | grep -Eo "[0-9]*")
+			if [ "$((unallocated >> 1))" -le "$reduce_step" ]; then
+				break
+			fi
+			if ! btrfs filesystem resize -${reduce_step} "$mount_dir"; then
+				break
+			fi
+		done
+		
+		pt_root_size_bytes=$(btrfs fi show --raw "$mount_dir" | grep -Eo "size\\s+[0-9]+" | cut -d " " -f 2)
+		pt_root_size_new=$((pt_root_size_bytes >> 9))
+		
+		sync "$mount_dir"
+		sleep 1
+		traps_pop #umount
+		;;
+	*)
+		echo "Root partition type $pt_root_type resize is not supported." >&2
+		;;
+esac
+
+traps_pop #rmdir
+
+sfdisk --no-tell-kernel "$loop_dev" < <(echo "$pt_dump" | sed "s/\(start=\\s\\+$pt_root_start,\\s\\+size=\\s\\+\)$pt_root_size/\\1$pt_root_size_new/")
+
+sync "$loop_dev"
+
+traps_pop #losetup
+
+disk_sect=$(((pt_root_start+pt_root_size_new)<<9))
+
+truncate -s $disk_sect "$target"
+
+traps_stop
+
+
