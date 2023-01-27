@@ -213,11 +213,11 @@ case "$pt_root_type" in
 			sed -i "s/.*\\s\\+swap\\s\\+.*/#\\0/" "$mount_dir/etc/fstab"
 		fi
 		
-		if ! grep "x-systemd.growfs" "$mount_dir/etc/fstab"; do
+		if ! grep "x-systemd.growfs" "$mount_dir/etc/fstab"; then
 			#TODO: add growfs script
 			echo "Image needs resizefs script."
 			exit 1
-		done
+		fi
 		
 		e4defrag "$mount_dir"
 		resize2fs -Mp "$mount_dir"
@@ -245,11 +245,11 @@ case "$pt_root_type" in
 			sed -i "s/.*\\s\\+swap\\s\\+.*/#\\0/" "$mount_dir/$pt_root_fstab_path"
 		fi
 		
-		if ! grep "x-systemd.growfs" "$mount_dir/$pt_root_fstab_path"; do
+		if grep "x-systemd.growfs" "$mount_dir/$pt_root_fstab_path"; then
 			#TODO: add growfs script
 			echo "Image needs resizefs support."
 			exit 1
-		done
+		fi
 		
 		if [ -f "$mount_dir$pt_root_default_path/swapfile" ]; then
 			rm "$mount_dir$pt_root_default_path/swapfile"
